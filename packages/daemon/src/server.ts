@@ -81,6 +81,7 @@ import { configRoutes } from "./routes/config.js";
 import { hostsRoutes } from "./routes/hosts.js";
 import { hostReadThrough } from "./domain/hosts/read-through.js";
 import { apiOriginProtection } from "./middleware/origin-guard.js";
+import { mutatingVerbsBearerMiddleware } from "./middleware/auth-bearer-token.js";
 import { jsonBodyErrorHandler, trackJsonBodyParseErrors } from "./middleware/json-body-error.js";
 import { getSelfHostId, getSelfHostIdSource } from "./domain/hosts/fanout-contract.js";
 import { contextPacksRoutes } from "./routes/context-packs.js";
@@ -665,6 +666,17 @@ export function createApp(deps: AppDeps): Hono {
   // error, never forwarding them. Absent/local host param falls through to
   // the existing handlers untouched (the FR-2 zero-regression negative).
   app.use("/api/*", hostReadThrough());
+
+  // Mutating-verbs bearer floor. Mounted after the read-through so a forwarded
+  // non-GET still gets the read-through's own MH-3 refusal (not a 401), and
+  // before every route mount so a router cannot fall outside token coverage.
+  // Pass-through when no bearer is configured (the loopback default) and for
+  // GET/HEAD; per-router mounts keep their own checks above this floor.
+  app.use("/api/*", mutatingVerbsBearerMiddleware({
+    expectedToken: deps.missionControlBearerToken ?? null,
+    additionalTokens: [deps.terminalBearerToken],
+    exemptPaths: ["/api/activity/hooks", "/api/hosts/pair-request"],
+  }));
 
   app.get("/healthz", (c) => {
     // OPR.0.4.3.21 — enrich the health surface with event-loop wedge evidence

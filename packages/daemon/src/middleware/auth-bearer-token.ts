@@ -82,6 +82,81 @@ export interface AuthBearerTokenOpts {
 }
 
 /**
+ * Mutating-verbs gate for /api/* (the global counterpart to the per-router
+ * mounts below): when a bearer token is configured, every POST/PUT/PATCH/
+ * DELETE must present it (or one of the additional configured tokens, such
+ * as the terminal token the web UI holds). GET/HEAD stay open — the bearer
+ * is for write integrity, not view confidentiality — and with no token
+ * configured (the loopback default) this passes everything through, so the
+ * gate only bites when the operator has explicitly opted into auth.
+ *
+ * Per-router mounts keep their own checks; this is the floor, not a
+ * replacement, so a router cannot silently fall outside token coverage.
+ */
+export function mutatingVerbsBearerMiddleware(opts: AuthBearerTokenOpts & {
+  /** Other configured tokens that confer the same authority (e.g. the terminal token). */
+  additionalTokens?: Array<string | null | undefined>;
+  /**
+   * Exact route paths that run their own equivalent credential check inside
+   * the handler, or that must stay open before any token exists, waived here:
+   * POST /api/activity/hooks accepts the dedicated activity-hook token
+   * (Authorization or a non-Authorization header), and POST
+   * /api/hosts/pair-request is the deliberately-open pre-token bootstrap leg
+   * documented on the hosts routes. Neither credential is the operator bearer,
+   * and neither route should inherit it or grant it.
+   */
+  exemptPaths?: string[];
+}): MiddlewareHandler {
+  const { expectedToken } = opts;
+  const extras = (opts.additionalTokens ?? []).filter(
+    (t): t is string => typeof t === "string" && t.length > 0,
+  );
+  const exempt = new Set(opts.exemptPaths ?? []);
+  return async (c, next) => {
+    if (expectedToken === null) {
+      // Loopback-only mode (no bearer configured). Pass through.
+      await next();
+      return;
+    }
+    const method = c.req.method.toUpperCase();
+    if (method === "GET" || method === "HEAD" || method === "OPTIONS") {
+      await next();
+      return;
+    }
+    if (exempt.has(c.req.path)) {
+      await next();
+      return;
+    }
+    const header = c.req.header("Authorization") ?? c.req.header("authorization");
+    if (header) {
+      const match = /^Bearer\s+(.+)$/i.exec(header);
+      const provided = match?.[1]?.trim();
+      if (provided) {
+        if (constantTimeEqual(provided, expectedToken)) {
+          await next();
+          return;
+        }
+        for (const extra of extras) {
+          if (constantTimeEqual(provided, extra)) {
+            await next();
+            return;
+          }
+        }
+      }
+    }
+    return c.json({
+      error: "unauthorized",
+      message: `Daemon API auth failed: this ${method} route requires the configured bearer token`,
+      what_failed: "missing or non-matching Authorization header on a mutating route",
+      why_it_matters:
+        "A bearer token is configured on this daemon, so every mutating API route requires it — a token that protects only some routes is not protection.",
+      what_to_do:
+        "Resend with `Authorization: Bearer <token>` (the token from the daemon's auth.bearerToken / OPENRIG_AUTH_BEARER_TOKEN; the CLI sends it automatically when OPENRIG_AUTH_BEARER_TOKEN is set, or per command via --bearer). Reads (GET) remain open.",
+    }, 401);
+  };
+}
+
+/**
  * Hono middleware that enforces bearer-token auth on the routes it
  * is mounted on. Returns 401 with a three-part error body for missing
  * or mismatched tokens.

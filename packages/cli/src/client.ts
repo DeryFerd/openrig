@@ -57,6 +57,26 @@ function resolveTerminalToken(): string | null {
   }
 }
 
+/**
+ * Hosts this machine may present its operator token to: loopback, and the
+ * tailscale CGNAT/ULA ranges the daemon itself treats as its auth boundary
+ * (see `isTailscaleBind` in the daemon's auth middleware). Anything else is
+ * someone else's machine even when a caller aimed the client there by hand,
+ * and the token stays home.
+ */
+export function isTrustedLocalTarget(hostname: string): boolean {
+  const host = hostname.trim().toLowerCase().replace(/^\[|\]$/g, "");
+  if (host === "localhost" || host === "::1") return true;
+  if (/^127(?:\.\d{1,3}){3}$/.test(host)) return true;
+  const ipv4 = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(host);
+  if (ipv4) {
+    const first = Number(ipv4[1]);
+    const second = Number(ipv4[2]);
+    return first === 100 && second >= 64 && second <= 127;
+  }
+  return host.startsWith("fd7a:115c:a1e0:");
+}
+
 /** The OS code behind a failed connection (`EPERM`, `ECONNREFUSED`, …) when Node exposes one.
  *  `fetch` reports every connection failure as "fetch failed" and keeps the code on `cause`. */
 export function connectionErrorCode(err: unknown): string | undefined {
@@ -267,6 +287,27 @@ export class DaemonClient {
     const timeoutMs = options?.timeoutMs ?? this.timeoutMs;
     if (options?.headers) {
       init = { ...init, headers: { ...(init.headers as Record<string, string> ?? {}), ...options.headers } };
+    }
+    // Operator-bearer coherence: when OPENRIG_AUTH_BEARER_TOKEN is set (the same env the
+    // daemon's startup invariant names), present it on requests that carry no explicit
+    // Authorization, so every CLI call can satisfy the daemon's mutating-verbs gate without
+    // a per-command flag. A caller's explicit header wins (any casing); the token travels
+    // only to hosts this machine already trusts like itself — loopback and the tailscale
+    // ranges the daemon treats as its own auth boundary — never to a remote target, however
+    // the client was constructed. The seat-identity stamp below stays authoritative and last.
+    if (!this.remoteTarget) {
+      const operatorToken = readOpenRigEnv("OPENRIG_AUTH_BEARER_TOKEN")?.trim();
+      if (operatorToken) {
+        let trustedLocal = false;
+        try {
+          trustedLocal = isTrustedLocalTarget(new URL(this.baseUrl).hostname);
+        } catch { /* unparseable base URL: never attach */ }
+        const existingAuth = Object.keys((init.headers ?? {}) as Record<string, string>)
+          .find((key) => key.toLowerCase() === "authorization");
+        if (trustedLocal && !existingAuth) {
+          init = { ...init, headers: { ...(init.headers as Record<string, string> ?? {}), Authorization: `Bearer ${operatorToken}` } };
+        }
+      }
     }
     // P18 sender-provenance: stamp the seat-derived identity header LAST, so the transport — never a
     // caller-supplied header or a request body — decides the caller identity the channel of record records.

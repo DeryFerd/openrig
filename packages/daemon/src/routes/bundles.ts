@@ -1137,10 +1137,11 @@ bundleRoutes.post("/install", async (c) => {
   try {
   // Item 2 + Item 3 / slice-05: single safe extract pass yields both the
   // bundle manifest (for compat check) and the rig name (for conflict check).
-  // This pass also runs the manifest SAFETY validation — the only site that
-  // validates rig_spec/project fields before install — so it runs
-  // unconditionally: --skip-version-check and --force override the Item-2
-  // compat check and the Item-3 conflict check, not the safety validation.
+  // This pass also runs the manifest SAFETY validation — the first place
+  // rig_spec/project fields are validated on the install path; the bundle
+  // source resolver validates them again later — so it runs unconditionally:
+  // --skip-version-check and --force override the Item-2 compat check and
+  // the Item-3 conflict check, not the safety validation.
   let installMeta: { bundleManifest: Record<string, unknown>; rigName: string | undefined };
   try {
     installMeta = await extractInstallTimeMetadata(bundlePath);

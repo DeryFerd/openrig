@@ -41,6 +41,40 @@ exports:
       default_scope: project_shared
 `.trim();
 
+// Writes a real .rigbundle (+ .sha256 sibling) whose bundle.yaml is a valid v1
+// manifest, optionally with a hostile project block. Used by install-route tests
+// that must pass (or deliberately fail) the always-on manifest safety pre-check.
+async function writeBundleArchive(dir: string, name: string, projectBlock: string | null): Promise<string> {
+  const staging = path.join(dir, `${name}-staging`);
+  fs.mkdirSync(staging, { recursive: true });
+  fs.writeFileSync(path.join(staging, "rig.yaml"), VALID_SPEC, "utf-8");
+  const bundleYaml = [
+    "schema_version: 1",
+    `name: ${name}`,
+    'version: "0.1.0"',
+    'created_at: "2026-10-06T00:00:00.000Z"',
+    "rig_spec: rig.yaml",
+    "packages:",
+    "  - name: test-pkg",
+    '    version: "1.0.0"',
+    "    path: pkg",
+    "    original_source: ./test-pkg",
+    ...(projectBlock ? ["project:", projectBlock] : []),
+    // unpack() requires the integrity section; bundle.yaml itself is a control
+    // file excluded from it, mirroring computeIntegrity.
+    "integrity:",
+    "  algorithm: sha256",
+    "  files:",
+    `    rig.yaml: ${createHash("sha256").update(VALID_SPEC).digest("hex")}`,
+  ].join("\n") + "\n";
+  fs.writeFileSync(path.join(staging, "bundle.yaml"), bundleYaml, "utf-8");
+  const archivePath = path.join(dir, `${name}.rigbundle`);
+  await tar.create({ gzip: true, file: archivePath, cwd: staging }, ["bundle.yaml", "rig.yaml"]);
+  const digest = createHash("sha256").update(fs.readFileSync(archivePath)).digest("hex");
+  fs.writeFileSync(`${archivePath}.sha256`, digest, "utf-8");
+  return archivePath;
+}
+
 describe("Bundle API routes", () => {
   let db: Database.Database;
   let setup: ReturnType<typeof createTestApp>;
@@ -930,6 +964,52 @@ describe("Bundle API routes", () => {
       const body = await installRes.json();
       expect(body.error).not.toBe("Bundle compatibility check failed");
     }
+  });
+
+  // The manifest safety pre-check (unpack + manifest validation) is the ONLY site
+  // where a bundle.yaml's rig_spec/project fields are validated before install.
+  // --skip-version-check and --force override the Item-2 compat check and the
+  // Item-3 conflict check (their documented CLI contract); they must not also
+  // disable the safety validation, or a hostile manifest installs unvalidated.
+  it("POST /api/bundles/install refuses a hostile project block even with skipVersionCheck and force", async () => {
+    const bundlePath = await writeBundleArchive(tmpDir, "hostile-project-flags", "  id: evilproj\n  path: ../../outside");
+    const installRes = await app.request("/api/bundles/install", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ bundlePath, plan: true, skipVersionCheck: true, force: true }),
+    });
+    expect(installRes.status).toBe(400);
+    const body = await installRes.json();
+    expect(body.error).toBe("Bundle install pre-check could not run (extraction failed)");
+    expect(String(body.detail)).toContain("Invalid v1 bundle manifest");
+    expect(String(body.detail)).toContain("project.path");
+  });
+
+  it("POST /api/bundles/install already refuses the same hostile project block without flags", async () => {
+    const bundlePath = await writeBundleArchive(tmpDir, "hostile-project-noflags", "  id: evilproj\n  path: ../../outside");
+    const installRes = await app.request("/api/bundles/install", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ bundlePath, plan: true }),
+    });
+    expect(installRes.status).toBe(400);
+    const body = await installRes.json();
+    expect(body.error).toBe("Bundle install pre-check could not run (extraction failed)");
+    expect(String(body.detail)).toContain("Invalid v1 bundle manifest");
+  });
+
+  it("POST /api/bundles/install with skipVersionCheck and force still pre-checks a valid manifest through", async () => {
+    const bundlePath = await writeBundleArchive(tmpDir, "valid-project-flags", null);
+    const installRes = await app.request("/api/bundles/install", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ bundlePath, plan: true, skipVersionCheck: true, force: true }),
+    });
+    const body = await installRes.json().catch(() => ({}));
+    // The valid bundle must pass the always-on safety pre-check; whatever the
+    // plan-mode outcome is, it must not be refused by the manifest validation.
+    expect(String(body.error ?? "")).not.toContain("pre-check could not run");
+    expect(String(body.detail ?? "")).not.toContain("Invalid v1 bundle manifest");
   });
 
   it("POST /api/bundles/install fails with 3-part error when min_cli_version exceeds the CLI version sent in body", async () => {
@@ -3212,13 +3292,17 @@ describe("POST /api/bundles/install: pre-launch routing report", () => {
   let home: string;
   let origHome: string | undefined;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     db = createDb();
     migrate(db, ALL_MIGRATIONS);
     home = fs.mkdtempSync(path.join(os.tmpdir(), "bundle-install-routing-"));
     origHome = process.env.OPENRIG_HOME;
     process.env.OPENRIG_HOME = home;
     setup = createTestApp(db);
+    // A real, manifest-valid archive: the install route's manifest safety
+    // pre-check always runs, so the stubbed bootstrap needs a bundle that
+    // passes it.
+    await writeBundleArchive(home, "b", null);
   });
 
   afterEach(() => {
@@ -3232,7 +3316,9 @@ describe("POST /api/bundles/install: pre-launch routing report", () => {
     return setup.app.request("/api/bundles/install", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      // skipVersionCheck + force: no pre-check extraction, so the stubbed bootstrap is the whole install
+      // skipVersionCheck + force: skip the compat and conflict checks; the
+      // manifest safety pre-check still runs on the real archive above, and
+      // the stubbed bootstrap is the rest of the install.
       body: JSON.stringify({ bundlePath: path.join(home, "b.rigbundle"), targetRoot: home, autoApprove: true, skipVersionCheck: true, force: true, ...body }),
     });
   }

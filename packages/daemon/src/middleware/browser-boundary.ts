@@ -120,24 +120,63 @@ function namesWithShortForm(names: string[]): string[] {
   return [...out];
 }
 
+/** Two textual forms of the same address compare equal: the interface form of a
+ *  tailnet IPv6 ULA and the DNS answer form differ only in zero compression, and
+ *  the WHATWG URL parser canonicalizes IPv6 for us. IPv4 falls through to string
+ *  equality. */
+function sameIp(a: string, b: string): boolean {
+  if (a === b) return true;
+  try {
+    return new URL(`http://[${a}]/`).hostname === new URL(`http://[${b}]/`).hostname;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * This machine's exact Tailscale MagicDNS name: a reverse lookup of its own tailnet IP
- * (found from local interfaces), asked of Tailscale's resolver only. One query, bounded
- * by `timeoutMs`; no subprocess, no peer list. Returns [] when no tailnet IP is active.
+ * (found from local interfaces), asked of Tailscale's resolver only, then confirmed —
+ * each returned name must resolve back, on that same resolver, to the exact IP we asked
+ * about, so a forged or stale PTR answer cannot widen the Host allowlist. Reverse and
+ * forward queries share one `timeoutMs` deadline; no subprocess, no peer list.
+ * Returns [] when no tailnet IP is active.
  */
 export async function discoverTailscaleSelfNames(opts: {
   timeoutMs: number;
   tailscaleIp?: () => string | null;
   reverse?: (ip: string, timeoutMs: number) => Promise<string[]>;
+  resolve?: (name: string, timeoutMs: number) => Promise<string[]>;
 }): Promise<string[]> {
   const ip = (opts.tailscaleIp ?? detectTailscaleInterface)();
   if (!ip) return [];
+  const deadline = Date.now() + Math.max(0, opts.timeoutMs);
+  const remaining = () => Math.max(1, deadline - Date.now());
   const reverse = opts.reverse ?? (async (address: string, timeoutMs: number) => {
     const resolver = new dnsPromises.Resolver({ timeout: timeoutMs, tries: 1 });
     resolver.setServers([TAILSCALE_RESOLVER]);
     return resolver.reverse(address);
   });
-  return namesWithShortForm(await reverse(ip, opts.timeoutMs));
+  const resolve = opts.resolve ?? (async (name: string, timeoutMs: number) => {
+    const resolver = new dnsPromises.Resolver({ timeout: timeoutMs, tries: 1 });
+    resolver.setServers([TAILSCALE_RESOLVER]);
+    const [v4, v6] = await Promise.allSettled([resolver.resolve4(name), resolver.resolve6(name)]);
+    return [
+      ...(v4.status === "fulfilled" ? v4.value : []),
+      ...(v6.status === "fulfilled" ? v6.value : []),
+    ];
+  });
+  const raw = await reverse(ip, remaining());
+  const candidates = [...new Set(raw.map(normalizeName).filter((name) => DNS_NAME.test(name)))];
+  const confirmed = await Promise.all(candidates.map(async (name) => {
+    try {
+      const addresses = await resolve(name, remaining());
+      return addresses.some((address) => sameIp(address, ip)) ? name : null;
+    } catch {
+      // A failed forward lookup drops that name; it never fails the whole discovery.
+      return null;
+    }
+  }));
+  return namesWithShortForm(confirmed.filter((name): name is string => name !== null));
 }
 
 function parseAllowedHosts(raw: string | undefined): Set<string> {

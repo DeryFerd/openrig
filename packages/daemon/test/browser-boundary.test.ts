@@ -145,7 +145,25 @@ describe("discovery controls", () => {
     const reverse = vi.fn(async () => [`${SELF}.`, "bad name!"]);
     expect(await discoverTailscaleSelfNames({ timeoutMs: 10, tailscaleIp: () => null, reverse })).toEqual([]);
     expect(reverse).not.toHaveBeenCalled();
-    expect(await discoverTailscaleSelfNames({ timeoutMs: 10, tailscaleIp: () => "100.106.37.120", reverse })).toEqual([SELF, "openrig-vm"]);
+    const resolve = vi.fn(async () => ["100.106.37.120"]);
+    expect(await discoverTailscaleSelfNames({ timeoutMs: 10, tailscaleIp: () => "100.106.37.120", reverse, resolve })).toEqual([SELF, "openrig-vm"]);
+    expect(resolve, "the reverse answer is confirmed with a forward lookup").toHaveBeenCalledWith(SELF, expect.any(Number));
+  });
+
+  it("discoverTailscaleSelfNames: a reverse name that does not resolve back to the tailnet IP is not admitted", async () => {
+    const ip = "100.106.37.120";
+    const reverse = vi.fn(async () => ["forged.attacker.example."]);
+    const resolve = vi.fn(async (name: string) => (name === "forged.attacker.example" ? ["203.0.113.9"] : [ip]));
+    expect(await discoverTailscaleSelfNames({ timeoutMs: 50, tailscaleIp: () => ip, reverse, resolve })).toEqual([]);
+    expect(reverse).toHaveBeenCalledTimes(1);
+    expect(resolve, "the forged name was still checked before admission").toHaveBeenCalledWith("forged.attacker.example", expect.any(Number));
+  });
+
+  it("discoverTailscaleSelfNames: a name whose forward lookup fails is not admitted", async () => {
+    const ip = "100.106.37.120";
+    const reverse = vi.fn(async () => [`${SELF}.`]);
+    const resolve = vi.fn(async () => { throw new Error("ENOTFOUND"); });
+    expect(await discoverTailscaleSelfNames({ timeoutMs: 50, tailscaleIp: () => ip, reverse, resolve })).toEqual([]);
   });
 });
 

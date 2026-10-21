@@ -553,7 +553,7 @@ describe("queue routes", () => {
       ])("a later fallback replaces a fallback line written for %s, as main does", async (_label, firstReason) => {
         const row = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "x", nudge: false });
         const fallback = (to: string, reason: unknown) => app.request(`/api/queue/${row.qitemId}/fallback`, {
-          method: "POST", headers: { "Content-Type": "application/json" },
+          method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "a@r" },
           body: JSON.stringify({ fallbackDestination: to, reason }),
         });
         expect((await fallback("c@r", firstReason)).status).toBe(200);
@@ -572,7 +572,7 @@ describe("queue routes", () => {
       ])("a later fallback replaces the line written with %s", async (_label, firstDestination, firstReason) => {
         const row = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "x", nudge: false });
         const fallback = (to: string, reason: unknown) => app.request(`/api/queue/${row.qitemId}/fallback`, {
-          method: "POST", headers: { "Content-Type": "application/json" },
+          method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "a@r" },
           body: JSON.stringify({ fallbackDestination: to, reason }),
         });
         expect((await fallback(firstDestination, firstReason)).status).toBe(200);
@@ -590,7 +590,7 @@ describe("queue routes", () => {
           body: JSON.stringify({ sourceSession: "a@r", destinationSession: "b@r", body: "x", nudge: false, ...extra }),
         }).then(async (res) => { expect(res.status).toBe(201); return (await res.json() as { qitemId: string }).qitemId; });
         const fallbackTo = (qitemId: string, to: unknown, reason: unknown) => app.request(`/api/queue/${qitemId}/fallback`, {
-          method: "POST", headers: { "Content-Type": "application/json" },
+          method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "a@r" },
           body: JSON.stringify({ fallbackDestination: to, reason }),
         });
 

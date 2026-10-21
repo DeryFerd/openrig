@@ -166,6 +166,50 @@ describe("rig queue CLI", () => {
     expect(errors.join("\n")).toContain("--source is required");
   });
 
+  it("fallback sends NO body actor inside a managed seat — the actor derives from the transport header (X-OpenRig-Session)", async () => {
+    const saved = process.env["OPENRIG_SESSION_NAME"];
+    process.env["OPENRIG_SESSION_NAME"] = "alice@rig";
+    try {
+      const { deps, calls } = makeDeps();
+      const program = createProgram({ queueDeps: deps });
+      await program.parseAsync(["node", "rig", "queue", "fallback", "qitem-test-1",
+        "--destination", "bob@rig", "--actor", "forged@evil", "--json"]);
+      const fallback = calls.find((c) => c.path === "/api/queue/qitem-test-1/fallback");
+      expect(fallback).toBeDefined();
+      const body = fallback!.body as Record<string, unknown>;
+      expect(body.actor).toBeUndefined();
+      expect(body.fallbackDestination).toBe("bob@rig");
+    } finally {
+      if (saved === undefined) delete process.env["OPENRIG_SESSION_NAME"];
+      else process.env["OPENRIG_SESSION_NAME"] = saved;
+    }
+  });
+
+  it("fallback accepts an explicit actor outside a managed seat as a body claim", async () => {
+    vi.stubEnv("OPENRIG_SESSION_NAME", "");
+    vi.stubEnv("RIGGED_SESSION_NAME", "");
+    const { deps, calls } = makeDeps();
+    const program = createProgram({ queueDeps: deps });
+    await program.parseAsync(["node", "rig", "queue", "fallback", "qitem-test-1",
+      "--destination", "bob@rig", "--actor", "external@rig", "--json"]);
+    expect(process.exitCode).toBeUndefined();
+    const body = calls.find((c) => c.path === "/api/queue/qitem-test-1/fallback")?.body as Record<string, unknown>;
+    expect(body.actor).toBe("external@rig");
+    expect(body.fallbackDestination).toBe("bob@rig");
+  });
+
+  it("fallback still requires an actor when neither the managed env nor an explicit claim is supplied", async () => {
+    vi.stubEnv("OPENRIG_SESSION_NAME", "");
+    vi.stubEnv("RIGGED_SESSION_NAME", "");
+    const { deps, calls } = makeDeps();
+    const program = createProgram({ queueDeps: deps });
+    await program.parseAsync(["node", "rig", "queue", "fallback", "qitem-test-1",
+      "--destination", "bob@rig", "--json"]);
+    expect(process.exitCode).toBe(1);
+    expect(calls).toEqual([]);
+    expect(errors.join("\n")).toContain("--actor is required");
+  });
+
   it("create preserves the legacy managed source env without forwarding an explicit body claim", async () => {
     vi.stubEnv("OPENRIG_SESSION_NAME", "");
     vi.stubEnv("RIGGED_SESSION_NAME", "legacy@rig");

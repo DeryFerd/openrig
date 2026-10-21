@@ -1412,13 +1412,21 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
     .description("Reroute a qitem to a fallback destination (e.g. unreachable seat)")
     .requiredOption("--destination <session>", "Fallback destination seat")
     .option("--reason <text>", "Reason for fallback", "manual")
+    .option("--actor <session>", "Declared actor outside a managed seat (recorded as claimed:v1); the managed seat env takes precedence")
     .option("--json", "JSON output for agents")
-    .action(async (qitemId: string, opts: { destination: string; reason: string; json?: boolean }) => {
+    .action(async (qitemId: string, opts: { destination: string; reason: string; actor?: string; json?: boolean }) => {
+      // A reroute is a write to the channel of record, so it needs an actor. A managed seat keeps
+      // the transport-derived identity; an external caller names the existing claimed:v1 body actor
+      // without forging a transport header.
+      const managedActor = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME");
+      const actor = resolveCurrentSession(managedActor ?? opts.actor, "actor");
+      if (!actor) return;
       const deps = getDeps();
       await withClient(deps, async (client) => {
         const res = await client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/fallback`, {
           fallbackDestination: opts.destination,
           reason: opts.reason,
+          ...(managedActor === undefined ? { actor } : {}),
         });
         await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status);
       });

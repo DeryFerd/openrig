@@ -892,7 +892,11 @@ export function queueRoutes(): Hono {
   // POST /:qitemId/fallback
   app.post("/:qitemId/fallback", async (c) => {
     const qitemId = c.req.param("qitemId");
-    const body = await c.req.json<{ fallbackDestination?: string; reason?: string }>().catch(() => ({} as never));
+    const body = await c.req.json<{ fallbackDestination?: string; reason?: string; actor?: string }>().catch(() => ({} as never));
+    // A reroute rewrites the row's destination and its line in the channel of record, so it
+    // needs an actor to attribute it to, the same as every other write in this controller.
+    const identity = requireSenderIdentity(c, { verb: "queue fallback", bodyClaim: body.actor ?? null });
+    if (!identity.ok) return identity.response;
     if (!body.fallbackDestination) return c.json({ error: "fallbackDestination is required" }, 400);
     try {
       const item = getRepo(c).routeToFallback(qitemId, body.fallbackDestination, body.reason ?? "manual");

@@ -5,6 +5,7 @@ import type { EventBus } from "../domain/event-bus.js";
 import type { ViewProjector } from "../domain/view-projector.js";
 import { ViewProjectorError } from "../domain/view-projector.js";
 import { queryLimit } from "./query-limit.js";
+import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
 
 /**
  * Coordination L5 — View HTTP routes (PL-004 Phase B).
@@ -16,8 +17,14 @@ import { queryLimit } from "./query-limit.js";
  * Per Phase A R1 SSE route-order lesson (slice IMPL § Audit Row 12):
  * SSE/static routes are mounted BEFORE the bare-param /:name catchall.
  */
-export function viewsRoutes(): Hono {
+export function viewsRoutes(opts?: { bearerToken?: string | null }): Hono {
   const app = new Hono();
+  const bearerToken = opts?.bearerToken ?? null;
+  // Registering a custom view stores SQL that this daemon later runs against its own
+  // database, so it is a write that only the operator may make. Enforced when a bearer
+  // is configured, pass-through on a daemon that runs without one.
+  const requireAuth = authBearerTokenMiddleware({ expectedToken: bearerToken });
+  app.use("/custom/register", requireAuth);
 
   function getProjector(c: { get: (key: string) => unknown }): ViewProjector {
     return c.get("viewProjector" as never) as ViewProjector;

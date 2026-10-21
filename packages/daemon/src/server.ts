@@ -790,7 +790,7 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/queue", queueRoutes());
   app.route("/api/workspace", workspaceRoutes());
   app.route("/api/projects", projectsRoutes());
-  app.route("/api/views", viewsRoutes());
+  app.route("/api/views", viewsRoutes({ bearerToken: deps.terminalBearerToken ?? null }));
   app.route("/api/watchdog", watchdogRoutes());
   app.route("/api/workflow", workflowRoutes());
   app.route(

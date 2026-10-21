@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { DaemonClient } from "../client.js";
+import { DaemonClient, terminalAuthHeaders } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
@@ -94,7 +94,7 @@ export function viewCommand(depsOverride?: ViewDeps): Command {
           viewName: opts.name,
           definition: opts.definition,
           registeredBySession: opts.session,
-        });
+        }, { headers: terminalAuthHeaders() });
         printResult(opts.json ?? false, res.data, res.status);
       });
     });

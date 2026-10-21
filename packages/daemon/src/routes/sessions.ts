@@ -251,7 +251,7 @@ nodesRoutes.get("/:logicalId", async (c) => {
 });
 
 // POST /api/rigs/:rigId/nodes/:logicalId/launch
-nodesRoutes.post("/:logicalId/launch", async (c) => {
+nodesRoutes.post("/:logicalId/launch", terminalAuthGuard(), async (c) => {
   const rigId = c.req.param("rigId")!;
   const logicalId = c.req.param("logicalId")!;
   const { rigRepo, nodeLauncher } = getDeps(c);
@@ -327,7 +327,7 @@ nodesRoutes.post("/:logicalId/launch", async (c) => {
 });
 
 // POST /api/rigs/:rigId/nodes/launch-subset — multi-target managed subset launch
-nodesRoutes.post("/launch-subset", async (c) => {
+nodesRoutes.post("/launch-subset", terminalAuthGuard(), async (c) => {
   const rigId = c.req.param("rigId")!;
   const { restoreOrchestrator } = getDeps(c);
   if (!restoreOrchestrator) {
@@ -445,7 +445,7 @@ nodesRoutes.post("/:logicalId/open-cmux", terminalAuthGuard(), async (c) => {
 });
 
 // POST /api/rigs/:rigId/nodes/:logicalId/focus
-nodesRoutes.post("/:logicalId/focus", async (c) => {
+nodesRoutes.post("/:logicalId/focus", terminalAuthGuard(), async (c) => {
   const rigId = c.req.param("rigId")!;
   const logicalId = c.req.param("logicalId")!;
   const { rigRepo, cmuxAdapter } = getDeps(c);
@@ -466,7 +466,7 @@ nodesRoutes.post("/:logicalId/focus", async (c) => {
 });
 
 // DELETE /api/rigs/:rigId/nodes/:logicalId
-nodesRoutes.delete("/:logicalId", async (c) => {
+nodesRoutes.delete("/:logicalId", terminalAuthGuard(), async (c) => {
   const rigId = c.req.param("rigId")!;
   const nodeRef = c.req.param("logicalId")!;
   const fallbackDestination = c.req.query("fallback");

@@ -2,7 +2,7 @@ import { Command } from "commander";
 import { readFileSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { resolveEffectiveHost } from "../host-selection.js";
-import { DaemonClient } from "../client.js";
+import { DaemonClient, terminalAuthHeaders } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
@@ -287,7 +287,7 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
         }
         if (!(await resolveLocalRig())) return;
         const res = await client.post<LaunchResponse>(`/api/rigs/${encodeURIComponent(rigId)}/nodes/launch-subset`, body,
-          opts.plan ? undefined : { timeoutMs: 120_000 });
+          { headers: terminalAuthHeaders(), ...(opts.plan ? {} : { timeoutMs: 120_000 }) });
         const notAPlan = Boolean(opts.plan && !isPlanAnswer(res.data) && answerShowsAction(res.status >= 200 && res.status < 300, res.data));
         if (notAPlan) {
           console.error(notAPlanMessage());
@@ -379,7 +379,7 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
       const body: Record<string, unknown> = retryBody ?? {};
       if (opts.snapshotId) body.snapshotId = opts.snapshotId;
 
-      const res = await client.post<LaunchResponse>(`/api/rigs/${encodeURIComponent(rigId)}/nodes/${encodeURIComponent(nodeRef)}/launch`, body, { timeoutMs: 120_000 });
+      const res = await client.post<LaunchResponse>(`/api/rigs/${encodeURIComponent(rigId)}/nodes/${encodeURIComponent(nodeRef)}/launch`, body, { headers: terminalAuthHeaders(), timeoutMs: 120_000 });
       if (opts.json) {
         console.log(JSON.stringify(res.data, null, 2));
         if (res.status >= 400) process.exitCode = 1;

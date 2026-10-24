@@ -1963,6 +1963,16 @@ export class QueueRepository {
     return registry.ok && resolveRegisteredHumanAddress(destination, registry.entities) !== null;
   }
 
+  /** The asked person, when a different registered person is acting on what was asked of them; else null. An agent, the
+   *  asked person under another spelling, and an ask to no registered person aren't someone else. */
+  askedSomeoneElse(actorSession: string, askedSession: string | null | undefined): string | null {
+    const registry = this.loadHumanRegistryFn();
+    if (!registry.ok) return null;
+    const asked = resolveRegisteredHumanAddress(askedSession, registry.entities);
+    const actor = resolveRegisteredHumanAddress(actorSession, registry.entities);
+    return asked && actor && actor !== asked ? asked : null;
+  }
+
   private validateReplyTo(replyTo: string, humanIntent: QueueCreateInput["humanIntent"]): void {
     if (humanIntent !== "update") {
       throw new QueueRepositoryError("reply_to_requires_update", "replyTo is accepted only with humanIntent update; a decision keeps its own thread so its reply stays unambiguous.");
@@ -4618,6 +4628,29 @@ export class QueueRepository {
           actorSession: "system",
           transitionNote: "released: claimant generation retired (seat handover)",
         });
+      }
+    });
+    txn();
+    return rows.length;
+  }
+
+  /**
+   * Slice 16: a runtime switch moves the seat's in-progress claims from its predecessor's generation to its successor's,
+   * inside the switch's commit, so none is released or held twice. Only in-progress rows the predecessor claimed move;
+   * pending, blocked and unstamped rows are untouched. Appends an audit transition per item. Returns the count moved.
+   */
+  transferClaimsByGeneration(fromGeneration: string, toGeneration: string, note: string): number {
+    if (!this.hasClaimedGenColumn || !fromGeneration || !toGeneration) return 0;
+    const rows = this.db
+      .prepare(`SELECT qitem_id FROM queue_items WHERE state = 'in-progress' AND claimed_by_generation_uuid = ?`)
+      .all(fromGeneration) as Array<{ qitem_id: string }>;
+    if (rows.length === 0) return 0;
+    const ts = new Date().toISOString();
+    const txn = this.db.transaction(() => {
+      for (const { qitem_id } of rows) {
+        this.db.prepare(`UPDATE queue_items SET claimed_by_generation_uuid = ?, ts_updated = ? WHERE qitem_id = ?`)
+          .run(toGeneration, ts, qitem_id);
+        this.transitionLog.append({ qitemId: qitem_id, state: "in-progress", actorSession: "system", transitionNote: note });
       }
     });
     txn();

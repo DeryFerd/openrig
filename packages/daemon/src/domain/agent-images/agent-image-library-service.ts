@@ -16,6 +16,7 @@
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync, mkdirSync, unlinkSync, rmSync } from "node:fs";
 import { join, relative, dirname } from "node:path";
 import { parseAgentImageManifest } from "./manifest-parser.js";
+import { resolveAgentImageDestination } from "./agent-image-destination.js";
 import {
   AgentImageError,
   type AgentImageEntry,
@@ -310,7 +311,18 @@ export class AgentImageLibraryService {
     manifest: AgentImageManifest,
     fileContents: Map<string, string>,
   ): string {
-    const targetDir = join(targetRootPath, manifest.name);
+    // The name becomes the directory name below. What matters is where that lands, not how it is
+    // spelled, and the check returns the very path this install writes (the captured file paths are
+    // checked the same way further down).
+    const destination = resolveAgentImageDestination(targetRootPath, manifest.name);
+    if (!destination.ok) {
+      throw new AgentImageError(
+        "manifest_invalid",
+        `agent image was not written: ${destination.message}. Name a directory inside the library root.`,
+        { name: manifest.name, root: targetRootPath },
+      );
+    }
+    const targetDir = destination.targetDir;
     if (existsSync(targetDir)) {
       throw new AgentImageError(
         "image_referenced",

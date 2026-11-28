@@ -23,7 +23,7 @@ import { readSeatClaudeMcp } from "./claude-mcp.js";
 import { isLaunchWrapperRuntime, readSeatLaunchWrapper } from "./launch-wrapper.js";
 import { RigRepository } from "./rig-repository.js";
 import { SessionTransport, inspectStartupStagedText } from "./session-transport.js";
-import { settleOwnStartupPaste, startupSubmissionEvidence, STARTUP_SUBMIT_CAPTURE_LINES, STARTUP_SUBMIT_RETRIES, STARTUP_UNCONFIRMED_REASON, waitForClaudeInputBox, type StartupSubmissionDiagnostic } from "./startup-submission-evidence.js";
+import { settleOwnStartupPaste, startupSubmissionEvidence, STARTUP_SUBMIT_CAPTURE_LINES, STARTUP_SUBMIT_EVIDENCE_WAIT_MS, STARTUP_SUBMIT_RETRIES, STARTUP_UNCONFIRMED_REASON, waitForClaudeInputBox, type StartupSubmissionDiagnostic } from "./startup-submission-evidence.js";
 import type { AppliedLaunchObservation } from "./permission-drift.js";
 import { resolveReadinessTimeoutMs } from "./readiness-timeout.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
@@ -44,6 +44,7 @@ const UNCONFIRMED_STAGED = STARTUP_UNCONFIRMED_REASON.staged;
 const UNCONFIRMED_UNOBSERVABLE = STARTUP_UNCONFIRMED_REASON.unobservable;
 const UNCONFIRMED_UNCLEAR = STARTUP_UNCONFIRMED_REASON.unclear;
 const UNCONFIRMED_RETRY_REFUSED = STARTUP_UNCONFIRMED_REASON.retryRefused;
+const UNCONFIRMED_NOT_REPORTED = STARTUP_UNCONFIRMED_REASON.notReported;
 
 /**
  * The proof line is held back on purpose when the startup prompt isn't confirmed submitted. Say that
@@ -1517,8 +1518,20 @@ export class StartupOrchestrator {
       input.lastSubmissionUnconfirmedReason = UNCONFIRMED_STAGED;
       return null;
     }
-    const submitResult = await this.tmuxAdapter.sendKeys(tmuxSession, ["Enter"]);
+    // A fresh Claude's first send counts as submitted on Claude's own report (STARTUP_SUBMIT_EVIDENCE_WAIT_MS), when the
+    // seat runs the activity hooks that make one. Listening starts before Enter, so the report can't be missed.
+    const promptSubmit = input.adapter.runtime === "claude-code" && sendOrder === 1 && !input.isRestore
+      && input.plan.entries.some((e) => e.category === "runtime_resource" && e.resourceType === "claude_activity_hooks")
+      ? this.watchPromptSubmit(input.nodeId, tmuxSession) : null;
+    let submitResult: Awaited<ReturnType<TmuxAdapter["sendKeys"]>>;
+    try {
+      submitResult = await this.tmuxAdapter.sendKeys(tmuxSession, ["Enter"]);
+    } catch (error) {
+      promptSubmit?.stop();
+      throw error;
+    }
     if (!submitResult.ok) {
+      promptSubmit?.stop();
       return { error: (submitResult as { message?: string }).message ?? "unknown" };
     }
 
@@ -1526,7 +1539,7 @@ export class StartupOrchestrator {
 
     const diagnostic: StartupSubmissionDiagnostic = { startupAttemptId: input.startupAttemptId,
       sendOrder, source, ...(actionIndex === undefined ? {} : { actionIndex }), observations: [], retry: "not_run" };
-    let phase: "initial" | "guarded_retry" | "after_retry" = "initial";
+    let phase: "initial" | "guarded_retry" | "after_retry" | "after_submit_wait" = "initial";
     const record = (pane: string | null, look?: number) => {
       const evidence = startupSubmissionEvidence(pane, text, STARTUP_SUBMIT_CAPTURE_LINES, input.adapter.runtime);
       if (evidence) diagnostic.observations.push({ ...evidence, phase, ...(look === undefined ? {} : { look }) });
@@ -1543,12 +1556,27 @@ export class StartupOrchestrator {
       await this.sleep(200);
       const first = await this.tmuxAdapter.capturePaneContent(tmuxSession, STARTUP_SUBMIT_CAPTURE_LINES);
       if (!first?.trim()) { record(first); return unverified("Startup submission capture is unavailable after Enter.", UNCONFIRMED_UNOBSERVABLE); }
-      const { pane, state: before, looks } = await settleOwnStartupPaste(
+      const settled = await settleOwnStartupPaste(
         () => this.tmuxAdapter.capturePaneContent(tmuxSession, STARTUP_SUBMIT_CAPTURE_LINES), first, text, input.adapter.runtime, this.sleep);
+      let { pane, state: before } = settled;
+      const { looks } = settled;
+      // An empty input box can be our paste not drawn yet, with its Enter lost. Without Claude's report, look again: a
+      // prompt that drew meanwhile is staged and gets the guarded retry below.
+      if (before === "clear" && promptSubmit && !await promptSubmit.wait(STARTUP_SUBMIT_EVIDENCE_WAIT_MS)) {
+        phase = "after_submit_wait";
+        const later = await this.tmuxAdapter.capturePaneContent(tmuxSession, STARTUP_SUBMIT_CAPTURE_LINES);
+        if (!later?.trim()) { record(later); return unverified("Startup submission capture is unavailable after waiting for Claude to report the prompt.", UNCONFIRMED_UNOBSERVABLE); }
+        pane = later;
+        before = inspectStartupStagedText(later, text, input.adapter.runtime);
+        if (before === "clear" && promptSubmit.hooked && !promptSubmit.submitted) {
+          record(later);
+          return unverified("Startup submission is unverified: Claude did not report taking the prompt, though its input box reads empty.", UNCONFIRMED_NOT_REPORTED);
+        }
+      }
       if (before === "clear") { input.lastSubmissionConfirmed = true; return null; }
       if (before === "unverified") {
-        if (looks) record(first, 0);
-        const evidence = record(pane, looks || undefined);
+        if (looks && phase === "initial") record(first, 0);
+        const evidence = record(pane, phase === "initial" ? looks || undefined : undefined);
         return unverified(evidence?.reason === "unrecognized_composer_boundary"
           ? "Startup submission is unverified: the current composer boundary was not recognized."
           : "Startup submission is unverified: the current composer does not positively match the complete prompt.",
@@ -1592,15 +1620,47 @@ export class StartupOrchestrator {
           : "Startup submission is unverified after the guarded retry: the current composer is ambiguous.",
         UNCONFIRMED_UNCLEAR);
       }
-      if (!retry.ok) return unverified(`Guarded startup retry did not submit: ${retry.error ?? retry.reason}; matching staged text is no longer visible.`, UNCONFIRMED_RETRY_REFUSED);
+      if (!retry.ok && !promptSubmit?.submitted) return unverified(`Guarded startup retry did not submit: ${retry.error ?? retry.reason}; matching staged text is no longer visible.`, UNCONFIRMED_RETRY_REFUSED);
+      if (promptSubmit && !await promptSubmit.wait(STARTUP_SUBMIT_EVIDENCE_WAIT_MS) && promptSubmit.hooked) {
+        return unverified("Startup submission is unverified after the guarded retry: Claude did not report taking the prompt, though its input box reads empty.", UNCONFIRMED_NOT_REPORTED);
+      }
       input.lastSubmissionConfirmed = true;
       return null;
     } catch (error) {
       if (!diagnostic.observations.some(observation => observation.phase === phase)) record(null);
       return unverified(`Startup submission observation is unavailable: ${(error as Error).message}`, UNCONFIRMED_UNOBSERVABLE);
     } finally {
+      promptSubmit?.stop();
       if (diagnostic.observations.length) input.submissionDiagnostics.push(diagnostic);
     }
+  }
+
+  /** This session's own UserPromptSubmit hook, as Claude reports it once it takes a prompt. `hooked` says whether any of
+   *  its hooks has arrived since listening began: with none, an empty input box can't be told apart this way, and keeps
+   *  the reading it had. Observation only. */
+  private watchPromptSubmit(nodeId: string, sessionName: string): { readonly hooked: boolean; readonly submitted: boolean; wait(ms: number): Promise<boolean>; stop(): void } {
+    const generation = this.sessionRegistry.currentOccupantTenure(nodeId)?.generationUuid;
+    let submitted = false;
+    let hooked = false;
+    const stop = this.eventBus.subscribe((event) => {
+      if (event.type !== "agent.activity" || event.sessionName !== sessionName || event.activity.evidenceSource !== "runtime_hook") return;
+      // Historical hooks are retained on the bus. A same-name relaunch must not use a prior occupant's report;
+      // preserve legacy hooks and the same process continued by adoption, as the activity route does.
+      if (generation && event.activity.generation && event.activity.generation !== generation
+        && !this.sessionRegistry.isOccupantContinuedByAdoption(nodeId, event.activity.generation)) return;
+      hooked = true;
+      if (event.activity.rawEvent === "UserPromptSubmit") submitted = true;
+    });
+    const sleep = this.sleep;
+    return {
+      get hooked() { return hooked; },
+      get submitted() { return submitted; },
+      async wait(ms: number) {
+        for (let waited = 0; !submitted && waited < ms; waited += 100) await sleep(100);
+        return submitted;
+      },
+      stop,
+    };
   }
 }
 

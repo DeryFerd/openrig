@@ -112,6 +112,19 @@ The terminal WebSocket API is available even when `ui.enabled` is false. That se
 web UI pages and assets, so a separate UI or client can use terminals while those remain off. The existing
 terminal bearer and [Browser access](browser-access.md) rules still apply.
 
+## Bearer tokens for another machine
+
+A host entry in `hosts.yaml` records where the token for THAT machine comes from, never the token itself. For an `http` entry the two pointer fields are optional and mutually exclusive:
+
+- **`bearer_env`** names an environment variable the daemon reads, so `bearer_env: HUB_SECRET` sends the value of `$HUB_SECRET`;
+- **`bearer_file`** names a file the daemon reads, so `bearer_file: /home/me/.openrig/secrets/host-hub.token` sends that file's trimmed contents.
+
+With neither field the entry is anonymous: no `Authorization` header is sent, which is what a daemon with no bearer configured needs. `rig host pair` fills in the second form with the token the other machine handed over, at `$OPENRIG_HOME/secrets/host-<id>.token`.
+
+A pointer's name or location does not say whose credential it is. The person running the daemon chooses where that token lives, and it may sit outside `$OPENRIG_HOME`, behind a link, or in a variable with any name. The field to read is the entry's `url`: the pointer should hold the token of the daemon listening there.
+
+The value behind the pointer is sent as `Authorization: Bearer <token>` on every cross-host read and write, so a pointer and a `url` belong together. Never put a token value in `hosts.yaml`. The registry holds pointers, and a value there would put the secret in plain text in a file the rig reads and may copy.
+
 ## Event streams
 
 All of them are server-sent events (`text/event-stream`):

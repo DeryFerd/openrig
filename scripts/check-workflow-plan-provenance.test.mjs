@@ -32,10 +32,12 @@ test("the plan job runs the base branch's copy of the plan script", () => {
   const checkout = planCheckout(doc());
   const ref = String(checkout.with?.ref ?? "");
   assert.ok(ref !== "", "the plan job's checkout names a ref; an unnamed checkout is the pull request's merge commit");
+  // The exact expression, base first: the comment in the workflow says the base commit decides, and a
+  // ref that merely mentions it could still be another expression that happens to contain the string.
   assert.match(
     ref,
-    /github\.event\.pull_request\.base\.sha/,
-    `the plan job's checkout ref (${ref}) must name the base branch's commit, so a pull request cannot supply the script that grades it`,
+    /^\$\{\{\s*github\.event\.pull_request\.base\.sha\s*\|\|\s*github\.ref_name\s*\}\}$/,
+    `the plan job's checkout ref (${ref}) must be the base commit first, then the dispatched branch, so a pull request cannot supply the script that grades it`,
   );
 });
 
